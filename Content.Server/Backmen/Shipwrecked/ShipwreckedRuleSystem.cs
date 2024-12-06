@@ -3,6 +3,7 @@ using System.Linq;
 using System.Numerics;
 using System.Text;
 using Content.Server.Access.Systems;
+using Content.Server.Administration;
 using Content.Server.Atmos.Components;
 using Content.Server.Atmos.EntitySystems;
 using Content.Server.Backmen.NPC.Prototypes;
@@ -42,6 +43,7 @@ using Content.Server.Storage.Components;
 using Content.Server.Warps;
 using Content.Server.Zombies;
 using Content.Shared.Access.Components;
+using Content.Shared.Administration;
 using Content.Shared.Atmos;
 using Content.Shared.Backmen.CCVar;
 using Content.Shared.Backmen.Shipwrecked.Components;
@@ -89,6 +91,7 @@ using Robust.Server.Maps;
 using Robust.Server.Player;
 using Robust.Shared.Audio;
 using Robust.Shared.Configuration;
+using Robust.Shared.Console;
 using Robust.Shared.Map;
 using Robust.Shared.Map.Components;
 using Robust.Shared.Map.Enumerators;
@@ -149,6 +152,7 @@ public sealed class ShipwreckedRuleSystem : GameRuleSystem<ShipwreckedRuleCompon
     [Dependency] private readonly SharedPinpointerSystem _pinpointerSystem = default!;
     [Dependency] private readonly TagSystem _tagSystem = default!;
     [Dependency] private readonly SharedSalvageSystem _salvageSystem = default!;
+    [Dependency] private readonly IConsoleHost _console = default!;
 
     public override void Initialize()
     {
@@ -180,9 +184,85 @@ public sealed class ShipwreckedRuleSystem : GameRuleSystem<ShipwreckedRuleCompon
 
         SubscribeLocalEvent<ShipwreckPinPointerComponent, MapInitEvent>(OnPinPointerSpawn);
         SubscribeLocalEvent<ShipwreckPinPointerComponent, GetVerbsEvent<Verb>>(GetVerbsPinPointer);
+
+        _console.RegisterCommand("planet_fix", PatchPlanetCommand, PatchPlanetCompletion);
     }
 
+    [AdminCommand(AdminFlags.Mapping)]
+    private async void PatchPlanetCommand(IConsoleShell shell, string argstr, string[] args)
+    {
+        if (!EntityUid.TryParse(args[0], out var entity) ||
+            TerminatingOrDeleted(entity) ||
+            !TryComp<BiomeComponent>(entity, out var biomeComponent))
+        {
+            shell.WriteError(Loc.GetString($"cmd-planet-map", ("map", args[0])));
+            return;
+        }
 
+        if (args.Length < 2 || !int.TryParse(args[1], out var size))
+        {
+            size = MaxPreloadOffset;
+        }
+
+        if (
+            args.Length < 4 ||
+            !float.TryParse(args[2], out var x) ||
+            !float.TryParse(args[3], out var y)
+            )
+        {
+            x = 0;
+            y = 0;
+        }
+
+        var mapPos = new MapCoordinates(x,y,Transform(entity).MapID);
+        var preloadArea = new Vector2(size, size);
+        var targetArea = new Box2(mapPos.Position - preloadArea, mapPos.Position + preloadArea);
+
+        RemComp<ShipwreckMapGridComponent>(entity);
+        var comp = new ShipwreckMapGridComponent()
+        {
+            Area = targetArea,
+        };
+        AddComp(entity, comp);
+        _biomeSystem.Preload(entity, biomeComponent, targetArea);
+
+        AddComp(entity, new RestrictedRangeComponent
+        {
+            Origin = mapPos.Position,
+            Range = size
+        });
+
+        // Enclose the area
+        var boundaryUid = Spawn(null, mapPos);
+        var boundaryPhysics = AddComp<PhysicsComponent>(boundaryUid);
+        var cShape = new ChainShape();
+        // Don't need it to be a perfect circle, just need it to be loosely accurate.
+        cShape.CreateLoop(Vector2.Zero, size + 1f, false, count: 4);
+        EntityManager.System<FixtureSystem>()
+            .TryCreateFixture(
+                boundaryUid,
+                cShape,
+                "boundary",
+                collisionLayer: (int) (CollisionGroup.HighImpassable | CollisionGroup.Impassable | CollisionGroup.LowImpassable | CollisionGroup.GhostImpassable),
+                body: boundaryPhysics);
+        EntityManager.System<SharedPhysicsSystem>().WakeBody(boundaryUid, body: boundaryPhysics);
+        AddComp<BoundaryComponent>(boundaryUid);
+    }
+
+    private CompletionResult PatchPlanetCompletion(IConsoleShell shell, string[] args)
+    {
+        if (args.Length == 1)
+            return CompletionResult.FromHintOptions(CompletionHelper.Components<BiomeComponent>(args[1], EntityManager),
+                "Планета");
+        else if (args.Length == 2)
+            return CompletionResult.FromHint($"размер (по умолчанию {MaxPreloadOffset})");
+        else if (args.Length == 3)
+            return CompletionResult.FromHint("x of center (required y or skiped)");
+        else if (args.Length == 4)
+            return CompletionResult.FromHint("y of center");
+
+        return CompletionResult.Empty;
+    }
 
     public static readonly VerbCategory ShipwreckPinpointer =
         new("verb-categories-shipwreck-pinpointer", null);

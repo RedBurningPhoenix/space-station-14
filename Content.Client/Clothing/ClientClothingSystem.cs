@@ -253,7 +253,8 @@ public sealed class ClientClothingSystem : ClothingSystem
         {
             foreach (var key in revealedLayers)
             {
-                sprite.RemoveLayer(key);
+                if(sprite.LayerMapTryGet(key, out var layer, false))
+                    sprite.RemoveLayer(layer);
             }
             revealedLayers.Clear();
         }
